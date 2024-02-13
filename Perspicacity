@@ -1,0 +1,212 @@
+// ==UserScript==
+// @name         Perspicacity
+// @namespace    http://*.youtube.com/
+// @version      0.6
+// @description  Unmatched YouTube perspicacity
+// @author       yop
+// @match        https://www.youtube.com/*
+// @icon         https://i.ibb.co/D5GsFYx/lgs.png
+// @grant        none
+// ==/UserScript==
+
+const waitForElements = (selector) => {
+  return new Promise((resolve) => {
+    if (document.querySelectorAll(selector)) {
+      return resolve(document.querySelectorAll(selector));
+    }
+
+    const observer = new MutationObserver((mutations) => {
+      if (document.querySelectorAll(selector)) {
+        resolve(document.querySelectorAll(selector));
+        observer.disconnect();
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  });
+};
+
+const parseKeywords = (s) => {
+  return s.replaceAll(`\\"`, `"`);
+}
+
+setInterval(async () => {
+  let parsedHref = new URL(window.location.href);
+  if (parsedHref.host === "studio.youtube.com") return;
+
+  let normalizedQueryString = Array.from(parsedHref.searchParams.entries())
+      .filter(e => ["v", "feature"].includes(e[0]))
+      .sort((a, b) => a > b)
+      .map(e => e[0] + "=" + e[1])
+      .join("&");
+  let currentURL = parsedHref.origin + parsedHref.pathname + "?" + normalizedQueryString;
+
+  const aboutRequest = await patchAboutTab(currentURL);
+  await patchChannelHeader(currentURL, aboutRequest);
+  await patchWatchTags(currentURL);
+}, 250);
+
+
+var lastAboutURL = "";
+var joinDateString = "";
+
+const patchAboutTab = async (currentURL) => {
+  let rightColumnElements = await waitForElements("#right-column .yt-formatted-string");
+  if (!rightColumnElements[0]) return;
+
+  if (rightColumnElements.length < 2) {
+      // Not a channel page (this happens on /watch for example).
+      return;
+  }
+
+  if (rightColumnElements[1].innerText !== joinDateString) {
+      rightColumnElements[1].innerText = joinDateString;
+      rightColumnElements[1].removeAttribute("is-empty");
+      rightColumnElements[1].removeAttribute("hidden");
+  }
+
+  if (currentURL == lastAboutURL) return;
+  lastAboutURL = currentURL;
+
+  try {
+    let req = new XMLHttpRequest();
+    req.open('GET', currentURL, false);
+    req.send(null);
+
+    let joinDate = null;
+    let keywords = null;
+    let channelId = null;
+    if (req.status == 200) {
+      let res = req.responseText;
+      joinDate = res.split(`"joinedDateText":{"runs":[{"text":"Joined "},{"text":"`)[1].split(`"`)[0];
+      channelId = res.split(`{"key":"browse_id","value":"`)[1].split(`"`)[0];
+      keywords = parseKeywords(res.split(`","keywords":"`)[1].split(`","ownerUrls":[`)[0]);
+    }
+
+    joinDateString =
+        (joinDate === null ? "join date unknown" : joinDate)
+        + (channelId === null ? " | channel ID unknown" : " | " + channelId)
+        + (keywords === null ? " | tags unknown" : keywords ? " | tags: " + keywords : "");
+
+    return req;
+  } catch (e) {
+  }
+};
+
+
+var lastHeaderURL = "";
+var headerString = "";
+var TAGS_PREVIEW_LENGTH = 100;
+
+const patchChannelHeader = async (currentURL, aboutRequest) => {
+  let elements = await waitForElements("#videos-count");
+  if (!elements[0]) return;
+
+  let subelements = elements[0].querySelectorAll("span");
+  if (!subelements[0]) {
+      if (elements[0].innerText !== headerString) {
+          elements[0].innerText = headerString;
+      }
+  } else {
+      if (subelements[0].innerText !== "") {
+          subelements[0].innerText = "";
+      }
+      if (subelements[1].innerText !== headerString) {
+          subelements[1].innerText = headerString;
+      }
+  }
+
+  if (currentURL == lastHeaderURL) return;
+  lastHeaderURL = currentURL;
+
+  try {
+    let req = aboutRequest;
+    if (!req) {
+      req = new XMLHttpRequest();
+      req.open('GET', currentURL, false);
+      req.send(null);
+    }
+
+    let isMonetized = null;
+    let hasRedirects = null;
+    let keywords = null;
+    let originalText = "";
+    if (req.status == 200) {
+      let res = req.responseText;
+      isMonetized = res.split(`{"key":"is_monetization_enabled","value":"`)[1].split(`"},`)[0] == "true";
+      hasRedirects = res.includes(`","doubleclickTrackingUsername":"`);
+      keywords = parseKeywords(res.split(`","keywords":"`)[1].split(`","ownerUrls":[`)[0]);
+      if (keywords.length > TAGS_PREVIEW_LENGTH) {
+          keywords = keywords.substring(0, TAGS_PREVIEW_LENGTH) + "...";
+      }
+      try {
+        let videosCountFirstRun = res.split(`"videosCountText":{"runs":[{"text":"`)[1].split(`"`)[0];
+        originalText = videosCountFirstRun === "No videos" || videosCountFirstRun === "1 video" ? videosCountFirstRun : videosCountFirstRun + " videos";
+      } catch(e) {}
+    }
+
+    headerString = originalText
+      + (isMonetized === null ? " | Monetization unknown" : isMonetized ? " | Monetized" : "")
+      + (hasRedirects === null ? " | Redirects unknown" : hasRedirects ? " | Has redirects" : "")
+      + (keywords === null ? " | tags unknown" : keywords ? " | tags: " + keywords : "") + "";
+  } catch (e) {
+  }
+};
+
+
+var lastWatchURL = "";
+var videoTagsString = "";
+
+const patchWatchTags = async (currentURL) => {
+  let ytdWatchFlexy = await waitForElements("ytd-watch-flexy");
+  if (!ytdWatchFlexy[0] || ytdWatchFlexy[0].hidden) {
+      // It exists as a hidden element on search results for example.
+      return;
+  }
+  // TODO: find what to actually do so that the tags show when clicking from search results... waiting works for me for now but it's a shit solution, better than nothing though.
+  await new Promise(r => setTimeout(r, 2000));
+
+  let videoInfoElements = await waitForElements("#above-the-fold .ytd-watch-metadata .ytd-watch-metadata");
+  if (!videoInfoElements[0]) return;
+
+  if (videoInfoElements[0].innerText !== videoTagsString) {
+      videoInfoElements[0].innerText = videoTagsString;
+      videoInfoElements[0].removeAttribute("is-empty");
+      videoInfoElements[0].removeAttribute("hidden");
+  }
+
+  if (currentURL == lastWatchURL) return;
+  lastWatchURL = currentURL;
+
+  try {
+    var req = new XMLHttpRequest();
+    req.open('GET', currentURL, false);
+    req.send(null);
+
+    let keywords = "{ERROR}";
+    let ytAd = "yt_ad=?";
+    if (req.status == 200) {
+      let res = req.responseText;
+
+      keywords = parseKeywords(res.split(`<meta name="keywords" content="`)[1].split(`">`)[0]);
+      if (keywords === "video, sharing, camera phone, video phone, free, upload") {
+          keywords = "";
+      }
+
+      ytAd = res.indexOf(`{"key":"yt_ad","value":"1"}`) !== -1 ? "yt_ad=1" : "";
+    }
+
+    videoTagsString = [keywords, ytAd].join(" | ");
+    if (videoTagsString.startsWith(" | ")) {
+        videoTagsString = videoTagsString.substring(3);
+    }
+    if (videoTagsString.endsWith(" | ")) {
+        videoTagsString = videoTagsString.substring(0, videoTagsString.length - 3);
+    }
+  } catch (e) {
+console.log("kjdfkjsdf", e);
+  }
+};
